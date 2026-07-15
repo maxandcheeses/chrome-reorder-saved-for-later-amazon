@@ -1,0 +1,17 @@
+.DS_Store
+*.zip
+node_modules/
+
+# Claude Code project/session data — settings, permissions, transcripts,
+# and any prompt/history logs must never be committed.
+.claude/
+
+# Secrets / credentials, in case any ever land here
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*credentials*
+*secret*
+*.log

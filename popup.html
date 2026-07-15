@@ -1,0 +1,122 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Saved for Later Reorder</title>
+<style>
+  html { max-height: 600px; }
+  body { font-family: "Amazon Ember", Arial, sans-serif; width: 360px; padding: 10px; font-size: 13px; color: #0f1111; background: #fff; max-height: 600px; overflow-y: auto; box-sizing: border-box; }
+  #header { display: flex; align-items: center; margin-bottom: 8px; }
+  h3 { margin: 0; font-size: 15px; color: #0f1111; }
+  #msg { color: #565959; font-size: 12px; margin: 8px 0; }
+  #msg.warning { color: #915400; }
+  #msg.loading { font-weight: bold; color: #0f1111; }
+  #incompleteBanner {
+    display: none; align-items: center; justify-content: space-between; gap: 8px;
+    background: #fef8f0; border: 1px solid #f0c37b; color: #7a4a00;
+    border-radius: 8px; padding: 6px 10px; margin-top: 8px; font-size: 11px;
+  }
+  #incompleteBanner button {
+    flex-shrink: 0; padding: 4px 10px; font-size: 11px; background: #fff; border: 1px solid #d5d9d9; border-radius: 16px;
+  }
+  #list { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow-y: auto; border: 1px solid #d5d9d9; border-radius: 8px; }
+  #list li {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px; border-bottom: 1px solid #eee; background: #fff; cursor: grab;
+  }
+  #list li:last-child { border-bottom: none; }
+  #list li.drag-source { opacity: 0.35; }
+  #list li.drag-over { outline: 2px dashed #e77600; outline-offset: -2px; }
+  #list img { width: 36px; height: 36px; object-fit: contain; flex-shrink: 0; background: #f5f5f5; border-radius: 4px; }
+  #list .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #list .badge {
+    width: 32px; text-align: center; font-size: 11px; font-weight: bold; background: #e77600; color: #fff;
+    border-radius: 999px; padding: 2px 4px; flex-shrink: 0; border: 1px solid #cc6900;
+    cursor: text; -moz-appearance: textfield;
+  }
+  #list .badge:hover { border-color: #a34b00; }
+  #list .badge:focus { outline: none; border-color: #a34b00; box-shadow: 0 0 0 2px rgba(163, 75, 0, 0.35); }
+  #list .badge::-webkit-inner-spin-button,
+  #list .badge::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  #list .handle { color: #999; flex-shrink: 0; }
+  #actions { display: flex; gap: 8px; margin-top: 10px; }
+  button {
+    padding: 7px 14px; font-size: 13px; border-radius: 999px; cursor: pointer;
+    font-family: inherit; box-shadow: 0 2px 5px rgba(15, 17, 17, 0.15);
+  }
+  #applyBtn { flex: 1; background: #ffd814; border: 1px solid #fcd200; color: #0f1111; font-weight: 600; }
+  #applyBtn:hover:not(:disabled) { background: #f7ca00; }
+  #applyBtn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
+  #refreshBtn, #loadAllBtn, #resetBtn, #settingsBtn { background: #f0f2f2; border: 1px solid #d5d9d9; color: #0f1111; }
+  #refreshBtn:hover, #loadAllBtn:hover:not(:disabled), #resetBtn:hover:not(:disabled), #settingsBtn:hover { background: #e3e6e6; }
+  #loadAllBtn:disabled, #resetBtn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
+  #settingsBtn { padding: 7px 10px; flex-shrink: 0; box-shadow: none; }
+  #status { margin-top: 8px; font-size: 12px; white-space: pre-wrap; color: #333; }
+  #status.error { color: #c40000; }
+  #settingsPanel { margin-top: 10px; padding: 8px 0 16px; border-top: 1px solid #eee; display: none; }
+  #settingsPanel h4 { margin: 0 0 8px 0; font-size: 13px; color: #0f1111; }
+  #settingsPanel label { display: block; margin-top: 6px; font-weight: bold; font-size: 12px; }
+  #settingsPanel select, #settingsPanel input[type="number"] {
+    width: 100%; box-sizing: border-box; margin-top: 2px; border: 1px solid #949494;
+    border-radius: 8px; padding: 5px 8px; font-family: inherit; font-size: 13px;
+  }
+  #settingsPanel select:focus, #settingsPanel input[type="number"]:focus {
+    outline: none; border-color: #e77600; box-shadow: 0 0 0 3px rgba(228, 121, 17, 0.5);
+  }
+  #settingsPanel .checkbox-row { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+  #settingsPanel .checkbox-row label { display: inline; margin: 0; font-weight: normal; }
+  #settingsPanel .checkbox-row input { width: auto; margin: 0; }
+  .hint { color: #777; font-size: 11px; margin: 2px 0 0; }
+  #bmcLink {
+    display: inline-flex; align-items: center; gap: 6px; margin-top: 12px;
+    background: #FFDD00; color: #000; border: 1px solid #000; border-radius: 999px;
+    padding: 7px 14px; font-size: 13px; font-weight: 600; text-decoration: none;
+    box-shadow: 0 2px 5px rgba(15, 17, 17, 0.15);
+  }
+  #bmcLink:hover { background: #f2d200; }
+  #projectLink {
+    display: block; margin-top: 10px; font-size: 11px; color: #007185; text-decoration: none;
+  }
+  #projectLink:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+  <div id="header">
+    <h3>Reorder saved for later</h3>
+  </div>
+  <div id="msg"></div>
+  <ul id="list"></ul>
+  <div id="actions">
+    <button id="settingsBtn" title="Settings">⚙</button>
+    <button id="refreshBtn" title="Quickly rescan without scrolling">Refresh</button>
+    <button id="resetBtn" title="Restore the order items actually appear in on the page" disabled>Reset</button>
+    <button id="applyBtn" disabled>Apply order</button>
+  </div>
+  <div id="incompleteBanner">
+    <span>⚠ Only the items Amazon has loaded so far are shown — there may be more.</span>
+    <button id="loadAllBtnInline">Load all</button>
+  </div>
+  <div id="status"></div>
+
+  <div id="settingsPanel">
+    <h4>Settings</h4>
+    <label for="delay">Delay between actions (ms)</label>
+    <input type="number" id="delay" min="500" max="10000" step="100">
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="reloadAfterApply" checked>
+      <label for="reloadAfterApply">Refresh the page after applying the order</label>
+    </div>
+
+    <a id="bmcLink" href="https://www.buymeacoffee.com/maxwellluong" target="_blank" rel="noopener noreferrer">
+      ☕ Buy me a coffee
+    </a>
+
+    <a id="projectLink" href="https://github.com/maxandcheeses/chrome-reorder-saved-for-later-amazon" target="_blank" rel="noopener noreferrer">
+      View project on GitHub ↗
+    </a>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
