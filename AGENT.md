@@ -24,13 +24,42 @@ lives in the popup's memory, the content script's in-page memory, and
   Apply is hit — Chrome discards all popup JS state on close, there's no
   other way to keep it. `naturalOrder` tracks the order items actually
   appear in on the page (independent of manual reordering) so the "Reset"
-  button can revert to it.
+  button can revert to it. `mergeItems` only filters/appends onto the
+  existing `order`/`naturalOrder` arrays rather than rebuilding them from
+  the fresh scan — intentional for incremental lazy-load scans, so
+  existing arrangement isn't churned as more items load — but that means
+  after a successful Apply, both must be explicitly reset to `[]` before
+  the next scan (done in `pollStatus`'s `s.done` branch), otherwise
+  `naturalOrder` stays stuck at the pre-apply arrangement and the
+  pre-apply estimate (`refreshApplyEstimate`) spuriously shows a nonzero
+  ETA even though the page is already in the applied order. There's also a
+  race between `pollStatus`'s 800ms poll interval and the page reload
+  content.js triggers right after finishing (when reload-after-apply is
+  on): if the reload severs the connection before the poll ever sees
+  `s.done`, the `SFL_GET_STATUS` call just throws with no further update,
+  which used to leave stale "Reordering N/N…" text stuck on screen
+  forever. The catch block now treats a disconnect that happens while
+  `applyInProgress` is true as an implicit success (content.js only
+  reloads after completing), clears the UI back to normal, and retries
+  loading items after a short delay to let the reloaded page's content
+  script re-inject.
 - `content.js` — injected into the Amazon cart page. Scans the DOM for
   saved-for-later rows (`scanItems`), optionally auto-scrolls to force lazy
   loading of the full list (`autoScrollToLoadAll`), computes a bump plan to
   reach a target order (`computeBumpPlan`), and executes it by clicking
   Amazon's real "Move to cart" / "Save for later" buttons per item
-  (`bumpItem`, `applyOrder`). Also holds the in-memory `pendingOrder` — the
+  (`bumpItem`, `applyOrder`). Both `applyOrder` (live countdown while
+  running, `status.estimatedRemainingMs`) and the `SFL_ESTIMATE_ORDER`
+  handler (pre-apply preview, doesn't touch the page) share
+  `computeBumpSequence` and estimate cost as bump-plan length × (configured
+  delay + a fixed `ESTIMATED_OVERHEAD_PER_ITEM_MS` allowance for the
+  per-item DOM-wait steps) — it's a guess, not measured, since those waits
+  aren't on a fixed timer. In `popup.js`, `formatEta` renders it: as soon
+  as the order changes (drag/typed position), `scheduleApplyEstimate`
+  debounces a `SFL_ESTIMATE_ORDER` call and shows "~Ns to apply" under the
+  Apply button; once Apply is clicked, `pollStatus` takes over and shows
+  the live "~Ns remaining" countdown instead, clearing back to nothing
+  when done. Also holds the in-memory `pendingOrder` — the
   not-yet-applied manual reorder — deliberately kept here instead of
   `chrome.storage.local`: this script is destroyed and re-injected fresh on
   every page reload/navigation/tab close, so `pendingOrder` resets to

@@ -7,6 +7,12 @@ that order for real on amazon.com.
 No data is collected, stored remotely, or transmitted anywhere. Everything
 happens locally in your browser.
 
+![Popup screenshot](screenshots/store-screenshot-1.png)
+
+| Idle | Reordering in progress |
+| --- | --- |
+| ![Popup idle state](screenshots/popup.png) | ![Popup mid-reorder, with Cancel button](screenshots/popup-reorder-in-progress.png) |
+
 ## Why
 
 Amazon has no way to reorder saved-for-later items — new saves always land

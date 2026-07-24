@@ -11,8 +11,16 @@
   // This has been observed to be the top on Amazon's cart page.
   const NEW_SAVE_GOES_TO = 'top';
 
+  // Rough per-item time allowance for the two DOM-wait steps inside
+  // bumpItem (moving to cart, then finding + clicking "save for later"
+  // again) — those aren't on a fixed timer, so this is an approximation
+  // based on typical Amazon response speed, not a measured value. Used for
+  // both the live "Apply order" countdown and the pre-apply ETA estimate.
+  const ESTIMATED_OVERHEAD_PER_ITEM_MS = 1500;
+
   let settings = { ...DEFAULT_SETTINGS };
-  let itemsByKey = new Map(); // key -> { rowEl, titleText }
+  let itemsByKey = new Map();
+  let cartItemsByKey = new Map(); // key -> { rowEl, titleText }
 
   // Holds a not-yet-applied manual reorder so it survives the popup being
   // closed and reopened. Deliberately kept in this content script's memory
@@ -22,11 +30,16 @@
   // effectively resets — which is the behavior we want.
   let pendingOrder = null;
 
+  // Set by SFL_CANCEL_APPLY while an apply is running; checked between bumps
+  // so an in-flight bump always finishes cleanly rather than being torn off
+  // mid-DOM-manipulation (which could strand an item in the cart).
+  let cancelRequested = false;
+
   // Broad selector for anything that could be a clickable action control —
   // Amazon mixes <a>, <button>, and <input type="submit"> across pages/locales.
   const ACTION_SELECTOR = 'a, button, input[type="submit"], input[type="button"], [role="button"]';
 
-  const status = { running: false, current: 0, total: 0, message: '', error: null, done: false };
+  const status = { running: false, current: 0, total: 0, message: '', error: null, done: false, cancelled: false };
 
   // --- Localization ----------------------------------------------------
   // Amazon's visible labels are translated per-country domain. Internal
@@ -140,6 +153,26 @@
     return getCandidateItemRows(document.body);
   }
 
+  // Mirror image of getAllSavedRows: cart-line rows are identified by having
+  // a "Save for later" action link (rather than "Move to cart"), which is
+  // specific enough to actual cart items that it doesn't pick up unrelated
+  // page sections.
+  function getAllCartRows() {
+    const actionLinks = Array.from(document.body.querySelectorAll(ACTION_SELECTOR)).filter(
+      isSaveForLaterElement
+    );
+    const rows = [];
+    const seen = new Set();
+    for (const link of actionLinks) {
+      const row = findRowAncestor(link);
+      if (row && !seen.has(row)) {
+        seen.add(row);
+        rows.push(row);
+      }
+    }
+    return rows;
+  }
+
   function findRowAncestor(el) {
     let node = el;
     for (let i = 0; i < 10 && node; i++) {
@@ -160,6 +193,11 @@
   function extractTitle(row) {
     const link = row.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]');
     return link ? (link.textContent || '').trim().slice(0, 120) : '(unknown item)';
+  }
+
+  function extractUrl(row) {
+    const link = row.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]');
+    return link ? link.href : null;
   }
 
   // Amazon lazy-loads product thumbnails (real URL often sits in data-src /
@@ -256,9 +294,44 @@
       const asin = extractAsin(row);
       const key = asin || `idx-${idx}-${extractTitle(row)}`;
       itemsByKey.set(key, { rowEl: row, titleText: extractTitle(row) });
-      items.push({ key, title: extractTitle(row), image: extractImage(row) });
+      items.push({ key, title: extractTitle(row), image: extractImage(row), url: extractUrl(row) });
     });
     return items;
+  }
+
+  function scanCartItems() {
+    const rows = getAllCartRows();
+    const items = [];
+    cartItemsByKey.clear();
+    rows.forEach((row, idx) => {
+      const asin = extractAsin(row);
+      const key = asin || `cart-idx-${idx}-${extractTitle(row)}`;
+      cartItemsByKey.set(key, { rowEl: row, titleText: extractTitle(row) });
+      items.push({ key, title: extractTitle(row), image: extractImage(row), url: extractUrl(row) });
+    });
+    return items;
+  }
+
+  // Moves one item from the cart back into "Saved for later" by clicking its
+  // "Save for later" control, then waits for it to actually show up in the
+  // saved-for-later rows before resolving.
+  async function saveCartItemForLater(key) {
+    const asin = /^[A-Z0-9]{10}$/.test(key) ? key : null;
+    const entry = cartItemsByKey.get(key);
+    if (!entry) throw new Error(`Item ${key} no longer in cart`);
+
+    const saveLink = findActionLink(entry.rowEl, isSaveForLaterElement);
+    if (!saveLink) throw new Error(`Could not find "Save for later" for ${entry.titleText}`);
+    robustClick(saveLink);
+
+    const reappeared = await waitForCondition(() => {
+      const rows = getAllSavedRows();
+      return rows.some((r) => (asin ? extractAsin(r) === asin : extractTitle(r) === entry.titleText)) || null;
+    });
+
+    if (!reappeared) {
+      throw new Error(`Clicked "Save for later" for "${entry.titleText}" but it never showed up in Saved for later.`);
+    }
   }
 
   function looksLikeCartPage() {
@@ -504,12 +577,11 @@
     }
   }
 
-  async function applyOrder(targetKeys) {
-    if (status.running) throw new Error('Already applying an order');
-    status.running = true;
-    status.done = false;
-    status.error = null;
-
+  // Shared by applyOrder (to actually run) and the SFL_ESTIMATE_ORDER
+  // handler (to preview cost without touching the page): given a desired
+  // order, works out which items actually need to be bumped and in what
+  // sequence.
+  function computeBumpSequence(targetKeys) {
     const currentItems = scanItems();
     const currentOrder = currentItems.map((i) => i.key);
     const target = targetKeys.filter((k) => currentOrder.includes(k));
@@ -522,11 +594,26 @@
       ? target.concat(leftovers)
       : leftovers.concat(target);
 
-    const sequence = computeBumpPlan(currentOrder, fullTarget, NEW_SAVE_GOES_TO);
+    return { sequence: computeBumpPlan(currentOrder, fullTarget, NEW_SAVE_GOES_TO), totalCount: fullTarget.length };
+  }
+
+  async function applyOrder(targetKeys) {
+    if (status.running) throw new Error('Already applying an order');
+    status.running = true;
+    status.done = false;
+    status.error = null;
+    status.cancelled = false;
+    cancelRequested = false;
+
+    const { sequence, totalCount } = computeBumpSequence(targetKeys);
     status.total = sequence.length;
     status.current = 0;
+    status.estimatedMsPerItem = settings.bumpDelayMs + ESTIMATED_OVERHEAD_PER_ITEM_MS;
+    status.estimatedRemainingMs = sequence.length * status.estimatedMsPerItem;
 
     for (const key of sequence) {
+      if (cancelRequested) break;
+
       // Re-scan before each bump since prior bumps change the DOM/keys map.
       scanItems();
       const entry = itemsByKey.get(key);
@@ -540,13 +627,21 @@
         return;
       }
       status.current++;
+      status.estimatedRemainingMs = (sequence.length - status.current) * status.estimatedMsPerItem;
       await sleep(settings.bumpDelayMs);
     }
 
     status.running = false;
     status.done = true;
+
+    if (cancelRequested) {
+      status.cancelled = true;
+      status.message = `Cancelled after reordering ${status.current}/${sequence.length} item(s).`;
+      return;
+    }
+
     status.message = sequence.length
-      ? `Done! Reordered ${sequence.length} item(s) (out of ${fullTarget.length} total).`
+      ? `Done! Reordered ${sequence.length} item(s) (out of ${totalCount} total).`
       : 'Already in the desired order — nothing to move.';
 
     if (settings.reloadAfterApply) {
@@ -562,7 +657,11 @@
     if (!msg || !msg.type) return;
 
     if (msg.type === 'SFL_PING') {
-      sendResponse({ isCartPage: looksLikeCartPage(), hasSavedItems: !!findSavedForLaterHeading() });
+      sendResponse({
+        isCartPage: looksLikeCartPage(),
+        hasSavedItems: !!findSavedForLaterHeading(),
+        pageLoading: document.readyState !== 'complete'
+      });
       return;
     }
 
@@ -580,6 +679,23 @@
       return true; // keep the message channel open for the async response
     }
 
+    if (msg.type === 'SFL_GET_CART_ITEMS') {
+      sendResponse({ items: scanCartItems() });
+      return;
+    }
+
+    if (msg.type === 'SFL_SAVE_FOR_LATER') {
+      (async () => {
+        try {
+          await saveCartItemForLater(msg.key);
+          sendResponse({ ok: true });
+        } catch (err) {
+          sendResponse({ ok: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
     if (msg.type === 'SFL_GET_LOAD_STATUS') {
       sendResponse({ loadStatus });
       return;
@@ -590,10 +706,29 @@
       return;
     }
 
+    if (msg.type === 'SFL_ESTIMATE_ORDER') {
+      // Preview-only: does not touch the page, just previews how many bumps
+      // the given order would take and a rough time estimate for them.
+      if (status.running) {
+        sendResponse({ count: null, estimatedMs: null });
+        return;
+      }
+      const { sequence } = computeBumpSequence(msg.order || []);
+      const estimatedMsPerItem = settings.bumpDelayMs + ESTIMATED_OVERHEAD_PER_ITEM_MS;
+      sendResponse({ count: sequence.length, estimatedMs: sequence.length * estimatedMsPerItem });
+      return;
+    }
+
     if (msg.type === 'SFL_APPLY_ORDER') {
       pendingOrder = null;
       applyOrder(msg.order || []);
       sendResponse({ started: true });
+      return;
+    }
+
+    if (msg.type === 'SFL_CANCEL_APPLY') {
+      if (status.running) cancelRequested = true;
+      sendResponse({ ok: true });
       return;
     }
 

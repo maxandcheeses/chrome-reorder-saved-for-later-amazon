@@ -5,21 +5,27 @@
 <title>Saved for Later Reorder</title>
 <style>
   html { max-height: 600px; }
-  body { font-family: "Amazon Ember", Arial, sans-serif; width: 360px; padding: 10px; font-size: 13px; color: #0f1111; background: #fff; max-height: 600px; overflow-y: auto; box-sizing: border-box; }
-  #header { display: flex; align-items: center; margin-bottom: 8px; }
+  body {
+    font-family: "Amazon Ember", Arial, sans-serif; width: 360px; padding: 8px; font-size: 13px;
+    color: #0f1111; background: #fff; max-height: 600px; overflow-y: auto; box-sizing: border-box;
+    transition: width 0.15s ease;
+  }
+  body.grid-mode { width: 800px; max-height: 600px; }
+  #header { display: flex; align-items: center; margin-bottom: 5px; }
   h3 { margin: 0; font-size: 15px; color: #0f1111; }
-  #msg { color: #565959; font-size: 12px; margin: 8px 0; }
+  #msg { color: #565959; font-size: 12px; margin: 5px 0; }
   #msg.warning { color: #915400; }
   #msg.loading { font-weight: bold; color: #0f1111; }
   #incompleteBanner {
     display: none; align-items: center; justify-content: space-between; gap: 8px;
     background: #fef8f0; border: 1px solid #f0c37b; color: #7a4a00;
-    border-radius: 8px; padding: 6px 10px; margin-top: 8px; font-size: 11px;
+    border-radius: 8px; padding: 5px 10px; margin-top: 5px; font-size: 11px;
   }
   #incompleteBanner button {
     flex-shrink: 0; padding: 4px 10px; font-size: 11px; background: #fff; border: 1px solid #d5d9d9; border-radius: 16px;
   }
-  #list { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow-y: auto; border: 1px solid #d5d9d9; border-radius: 8px; }
+  #list { list-style: none; margin: 0; padding: 0; max-height: 300px; overflow-y: auto; border: 1px solid #d5d9d9; border-radius: 8px; }
+  #list.disabled { pointer-events: none; opacity: 0.6; }
   #list li {
     display: flex; align-items: center; gap: 8px;
     padding: 6px 8px; border-bottom: 1px solid #eee; background: #fff; cursor: grab;
@@ -28,6 +34,8 @@
   #list li.drag-source { opacity: 0.35; }
   #list li.drag-over { outline: 2px dashed #e77600; outline-offset: -2px; }
   #list img { width: 36px; height: 36px; object-fit: contain; flex-shrink: 0; background: #f5f5f5; border-radius: 4px; }
+  a.title { color: inherit; text-decoration: none; cursor: pointer; }
+  a.title:hover { text-decoration: underline; color: #007185; }
   #list .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #list .badge {
     width: 32px; text-align: center; font-size: 11px; font-weight: bold; background: #e77600; color: #fff;
@@ -39,22 +47,186 @@
   #list .badge::-webkit-inner-spin-button,
   #list .badge::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
   #list .handle { color: #999; flex-shrink: 0; }
-  #actions { display: flex; gap: 8px; margin-top: 10px; }
+
+  #gridModal {
+    display: none; position: fixed; inset: 0; background: #fff; z-index: 100;
+    flex-direction: column;
+  }
+  body.grid-mode #gridModal { display: flex; }
+  #gridModalHeader {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 6px 14px; border-bottom: 1px solid #d5d9d9; flex-shrink: 0;
+  }
+  #gridModalHeader h4 { margin: 0; font-size: 13px; flex-shrink: 0; }
+  #gridModalHeader .toolbarLabel { color: #565959; font-size: 12px; flex-shrink: 0; }
+  #gridModalHeader.table-view .toolbarLabel,
+  #gridModalHeader.table-view #tileSizeGroup { display: none; }
+  .segmented { display: inline-flex; border: 1px solid #d5d9d9; border-radius: 999px; overflow: hidden; }
+  .tileSizeBtn {
+    padding: 5px 12px; font-size: 12px; border: none; border-radius: 0; background: #f0f2f2;
+    color: #0f1111; box-shadow: none;
+  }
+  .tileSizeBtn + .tileSizeBtn { border-left: 1px solid #d5d9d9; }
+  .tileSizeBtn:hover { background: #e3e6e6; }
+  .tileSizeBtn.active { background: #0f1111; color: #fff; }
+  #tableViewBtn {
+    width: 26px; height: 26px; padding: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 14px; line-height: 1; background: #f0f2f2; border: 1px solid #d5d9d9;
+    color: #0f1111; box-shadow: none; border-radius: 999px;
+  }
+  #tableViewBtn:hover { background: #e3e6e6; }
+  #tableViewBtn.active { background: #0f1111; color: #fff; border-color: #0f1111; }
+  #settingsBtnModal {
+    width: 26px; height: 26px; padding: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 14px; line-height: 1; background: #f0f2f2; border: 1px solid #d5d9d9;
+    color: #0f1111; box-shadow: none; border-radius: 999px;
+  }
+  #settingsBtnModal:hover { background: #e3e6e6; }
+  #closeGridBtn {
+    margin-left: auto; width: 26px; height: 26px; padding: 0; flex-shrink: 0;
+    background: #f0f2f2; border: 1px solid #d5d9d9; color: #0f1111; box-shadow: none;
+    border-radius: 999px; font-size: 13px; line-height: 1;
+  }
+  #closeGridBtn:hover { background: #e3e6e6; }
+
+  #tileGrid {
+    list-style: none; margin: 0; padding: 8px 10px; flex: 1; min-height: 0; overflow-y: auto;
+    display: grid; gap: 10px;
+    grid-template-columns: repeat(auto-fill, minmax(var(--tile-min, 150px), 1fr));
+  }
+  #tileGrid.disabled { pointer-events: none; opacity: 0.6; }
+  #tileGrid li.tile {
+    position: relative; display: flex; flex-direction: column;
+    background: #fff; border: 1px solid #d5d9d9; border-radius: 10px;
+    padding: 8px; cursor: grab;
+  }
+  #tileGrid li.tile .handle { display: none; }
+  #tileGrid li.tile.drag-source { opacity: 0.35; }
+  #tileGrid li.tile.drag-over { outline: 2px dashed #e77600; outline-offset: -2px; }
+  #tileGrid .badge {
+    width: 32px; text-align: center; font-size: 11px; font-weight: bold; background: #e77600; color: #fff;
+    border-radius: 999px; padding: 2px 4px; flex-shrink: 0; border: 1px solid #cc6900;
+    cursor: text; -moz-appearance: textfield; align-self: flex-start;
+  }
+  #tileGrid .badge:hover { border-color: #a34b00; }
+  #tileGrid .badge:focus { outline: none; border-color: #a34b00; box-shadow: 0 0 0 2px rgba(163, 75, 0, 0.35); }
+  #tileGrid .badge::-webkit-inner-spin-button,
+  #tileGrid .badge::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  #tileGrid .imgwrap {
+    display: flex; align-items: center; justify-content: center;
+    height: var(--tile-img, 100px); margin: 6px 0; background: #f5f5f5; border-radius: 6px; flex-shrink: 0;
+  }
+  #tileGrid img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  #tileGrid .title {
+    font-size: 12px; line-height: 1.3; display: -webkit-box;
+    -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  }
+
+  /* Table view mirrors the original popup's compact single-column list, but
+     stretched to fill the modal's full width/height instead of being capped
+     to a narrow column. */
+  #tileGrid.table-view {
+    display: block; border: 1px solid #d5d9d9; border-radius: 8px; width: 100%;
+  }
+  #tileGrid.table-view li.tile {
+    width: 100%; box-sizing: border-box;
+    flex-direction: row; align-items: center; gap: 8px;
+    border: none; border-radius: 0; border-bottom: 1px solid #eee;
+    padding: 2px 10px;
+  }
+  #tileGrid.table-view li.tile:last-child { border-bottom: none; }
+  #tileGrid.table-view li.tile .handle { display: block; color: #999; flex-shrink: 0; }
+  #tileGrid.table-view .badge { align-self: center; width: 30px; font-size: 11px; padding: 1px 4px; }
+  #tileGrid.table-view .imgwrap { width: 24px; height: 24px; margin: 0; flex-shrink: 0; }
+  #tileGrid.table-view .title {
+    -webkit-line-clamp: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+    font-size: 12px;
+  }
+
+  #gridModalFooter {
+    flex-shrink: 0; display: flex; align-items: center; gap: 12px;
+    border-top: 1px solid #eee; padding: 6px 14px; font-size: 11px; color: #565959;
+  }
+  #gridModalFooterMsgs { flex: 1; min-width: 0; }
+  #modalIncompleteBanner {
+    display: none; align-items: center; justify-content: space-between; gap: 8px;
+    background: #fef8f0; border: 1px solid #f0c37b; color: #7a4a00;
+    border-radius: 8px; padding: 6px 10px; font-size: 11px; margin-top: 6px;
+  }
+  #modalIncompleteBanner button {
+    flex-shrink: 0; padding: 4px 10px; font-size: 11px; background: #fff; border: 1px solid #d5d9d9; border-radius: 16px;
+  }
+  #gridModalFooterActions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  #resetBtnModal {
+    background: #f0f2f2; border: 1px solid #d5d9d9; color: #0f1111; font-size: 12px; padding: 6px 12px;
+  }
+  #resetBtnModal:hover:not(:disabled) { background: #e3e6e6; }
+  #applyBtnModal {
+    background: #ffd814; border: 1px solid #fcd200; color: #0f1111; font-weight: 600;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 1px; line-height: 1.2; padding: 5px 14px; font-size: 12px;
+  }
+  #applyBtnModal:hover:not(:disabled) { background: #f7ca00; }
+  #applyBtnModalSub { font-size: 9.5px; font-weight: 400; color: #6b5900; }
+  #applyBtnModalSub:empty { display: none; }
+  #cartSection { margin-top: 8px; }
+  #cartSection.hidden { display: none; }
+  #cartSection h4 { margin: 0 0 6px; font-size: 12px; color: #565959; }
+  #cartList { list-style: none; margin: 0; padding: 0; max-height: 160px; overflow-y: auto; border: 1px solid #d5d9d9; border-radius: 8px; }
+  #cartList li { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid #eee; background: #fff; }
+  #cartList li:last-child { border-bottom: none; }
+  #cartList img { width: 32px; height: 32px; object-fit: contain; flex-shrink: 0; background: #f5f5f5; border-radius: 4px; }
+  #cartList .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #cartList button {
+    flex-shrink: 0; padding: 4px 8px; font-size: 11px; background: #f0f2f2; border: 1px solid #d5d9d9;
+    color: #0f1111; border-radius: 999px;
+  }
+  #cartList button:hover:not(:disabled) { background: #e3e6e6; }
+  #actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  #actions #applyBtn { min-width: 120px; }
   button {
     padding: 7px 14px; font-size: 13px; border-radius: 999px; cursor: pointer;
     font-family: inherit; box-shadow: 0 2px 5px rgba(15, 17, 17, 0.15);
   }
-  #applyBtn { flex: 1; background: #ffd814; border: 1px solid #fcd200; color: #0f1111; font-weight: 600; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
+  #applyBtn {
+    flex: 1; background: #ffd814; border: 1px solid #fcd200; color: #0f1111; font-weight: 600;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 1px; line-height: 1.2; padding-top: 6px; padding-bottom: 6px;
+  }
   #applyBtn:hover:not(:disabled) { background: #f7ca00; }
   #applyBtn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
-  #refreshBtn, #loadAllBtn, #resetBtn, #settingsBtn { background: #f0f2f2; border: 1px solid #d5d9d9; color: #0f1111; }
-  #refreshBtn:hover, #loadAllBtn:hover:not(:disabled), #resetBtn:hover:not(:disabled), #settingsBtn:hover { background: #e3e6e6; }
+  #applyBtnSub { font-size: 10px; font-weight: 400; color: #6b5900; }
+  #applyBtnSub:empty { display: none; }
+  #refreshBtn, #loadAllBtn, #resetBtn, #settingsBtn, #gridViewBtn { background: #f0f2f2; border: 1px solid #d5d9d9; color: #0f1111; }
+  #refreshBtn:hover, #loadAllBtn:hover:not(:disabled), #resetBtn:hover:not(:disabled), #settingsBtn:hover, #gridViewBtn:hover { background: #e3e6e6; }
+  #gridViewBtn { padding: 7px 10px; }
   #loadAllBtn:disabled, #resetBtn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
+  #refreshBtn.cancel { background: #c40000; border-color: #a80000; color: #fff; }
+  #refreshBtn.cancel:hover:not(:disabled) { background: #a80000; }
+  #refreshBtn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
   #settingsBtn { padding: 7px 10px; flex-shrink: 0; box-shadow: none; }
-  #status { margin-top: 8px; font-size: 12px; white-space: pre-wrap; color: #333; }
+  #status { margin-top: 5px; font-size: 12px; white-space: pre-wrap; color: #333; }
+  #status:empty { margin-top: 0; }
   #status.error { color: #c40000; }
-  #settingsPanel { margin-top: 10px; padding: 8px 0 16px; border-top: 1px solid #eee; display: none; }
-  #settingsPanel h4 { margin: 0 0 8px 0; font-size: 13px; color: #0f1111; }
+  #settingsPanel {
+    display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    z-index: 200; width: 300px; max-height: 80vh; overflow-y: auto; box-sizing: border-box;
+    background: #fff; border: 1px solid #d5d9d9; border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(15, 17, 17, 0.25); padding: 12px 16px 16px;
+  }
+  #settingsBackdrop {
+    display: none; position: fixed; inset: 0; z-index: 199; background: rgba(15, 17, 17, 0.35);
+  }
+  #settingsBackdrop.show, #settingsPanel.show { display: block; }
+  #settingsPanelHeader { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  #settingsPanel h4 { margin: 0; font-size: 13px; color: #0f1111; }
+  #closeSettingsBtn {
+    width: 26px; height: 26px; padding: 0; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+    background: #f0f2f2; border: 1px solid #d5d9d9; color: #0f1111; box-shadow: none;
+    border-radius: 999px; font-size: 13px; line-height: 1;
+  }
+  #closeSettingsBtn:hover { background: #e3e6e6; }
   #settingsPanel label { display: block; margin-top: 6px; font-weight: bold; font-size: 12px; }
   #settingsPanel select, #settingsPanel input[type="number"] {
     width: 100%; box-sizing: border-box; margin-top: 2px; border: 1px solid #949494;
@@ -78,6 +250,11 @@
     display: block; margin-top: 10px; font-size: 11px; color: #007185; text-decoration: none;
   }
   #projectLink:hover { text-decoration: underline; }
+  #popupFooter {
+    margin-top: 6px; padding-top: 5px; border-top: 1px solid #eee;
+    font-size: 10.5px; line-height: 1.3; color: #767676; text-align: center;
+  }
+  #popupFooter:empty { display: none; }
 </style>
 </head>
 <body>
@@ -85,12 +262,50 @@
     <h3>Reorder saved for later</h3>
   </div>
   <div id="msg"></div>
+
   <ul id="list"></ul>
+
+  <div id="gridModal">
+    <div id="gridModalHeader">
+      <h4>Reorder saved for later</h4>
+      <span class="toolbarLabel">Zoom</span>
+      <div id="tileSizeGroup" class="segmented">
+        <button type="button" class="tileSizeBtn" data-size="s">S</button>
+        <button type="button" class="tileSizeBtn" data-size="m">M</button>
+        <button type="button" class="tileSizeBtn" data-size="l">L</button>
+      </div>
+      <button type="button" id="tableViewBtn" title="Switch to table view">☰</button>
+      <button type="button" id="settingsBtnModal" title="Settings">⚙</button>
+      <button type="button" id="closeGridBtn" title="Close grid view">✕</button>
+    </div>
+    <ul id="tileGrid"></ul>
+    <div id="gridModalFooter">
+      <div id="gridModalFooterMsgs">
+        <span id="modalMsg"></span>
+        <div id="modalIncompleteBanner">
+          <span>⚠ Only the items Amazon has loaded so far are shown — there may be more.</span>
+          <button id="loadAllBtnModal">Load all</button>
+        </div>
+      </div>
+      <div id="gridModalFooterActions">
+        <button id="resetBtnModal" title="Restore the order items actually appear in on the page" disabled>Reset</button>
+        <button id="applyBtnModal" disabled>
+          <span id="applyBtnModalLabel">Apply order</span>
+          <span id="applyBtnModalSub"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <div id="actions">
     <button id="settingsBtn" title="Settings">⚙</button>
+    <button id="gridViewBtn" title="Expand into a tile view for reordering with less scrolling">Grid view</button>
     <button id="refreshBtn" title="Quickly rescan without scrolling">Refresh</button>
     <button id="resetBtn" title="Restore the order items actually appear in on the page" disabled>Reset</button>
-    <button id="applyBtn" disabled>Apply order</button>
+    <button id="applyBtn" disabled>
+      <span id="applyBtnLabel">Apply order</span>
+      <span id="applyBtnSub"></span>
+    </button>
   </div>
   <div id="incompleteBanner">
     <span>⚠ Only the items Amazon has loaded so far are shown — there may be more.</span>
@@ -98,14 +313,34 @@
   </div>
   <div id="status"></div>
 
+  <div id="cartSection" class="hidden">
+    <h4>In your cart (save for later)</h4>
+    <ul id="cartList"></ul>
+  </div>
+
+  <div id="settingsBackdrop"></div>
   <div id="settingsPanel">
-    <h4>Settings</h4>
+    <div id="settingsPanelHeader">
+      <h4>Settings</h4>
+      <button type="button" id="closeSettingsBtn" title="Close settings">✕</button>
+    </div>
+    <label for="defaultView">Default view when opening the popup</label>
+    <select id="defaultView">
+      <option value="popup">Compact</option>
+      <option value="grid">Extended</option>
+    </select>
+
     <label for="delay">Delay between actions (ms)</label>
     <input type="number" id="delay" min="500" max="10000" step="100">
 
     <div class="checkbox-row">
       <input type="checkbox" id="reloadAfterApply" checked>
       <label for="reloadAfterApply">Refresh the page after applying the order</label>
+    </div>
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="titleLinksEnabled" checked>
+      <label for="titleLinksEnabled">Make item titles clickable links (opens product in background tab)</label>
     </div>
 
     <a id="bmcLink" href="https://www.buymeacoffee.com/maxwellluong" target="_blank" rel="noopener noreferrer">
@@ -116,6 +351,8 @@
       View project on GitHub ↗
     </a>
   </div>
+
+  <div id="popupFooter"></div>
 
   <script src="popup.js"></script>
 </body>

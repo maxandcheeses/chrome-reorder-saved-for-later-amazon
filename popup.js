@@ -1,19 +1,66 @@
 const STORAGE_KEY = 'sfl_settings';
 const DEFAULTS = {
   bumpDelayMs: 600,
-  reloadAfterApply: true
+  reloadAfterApply: true,
+  tileSize: 'm',
+  defaultView: 'popup',
+  titleLinksEnabled: true,
+  tableView: false
 };
 
 let order = []; // array of keys, top to bottom (may include manual reordering)
 let naturalOrder = []; // array of keys in the order Amazon's page actually shows them
 let itemsByKey = new Map();
+let cartItems = []; // items currently in the cart, eligible to be saved for later
+let savingCartKey = null; // key currently being moved from cart -> saved, if any
 let activeTabId = null;
 let statusPollHandle = null;
 let watchHandle = null;
 let applyInProgress = false;
 let loadingAll = false;
+let estimateDebounceHandle = null;
+let estimateRequestSeq = 0;
+let gridMode = false;
+let tableView = false;
+let tileSize = 'm';
+let titleLinksEnabled = true;
+const TILE_SIZES = { s: { min: '110px', img: '70px' }, m: { min: '150px', img: '100px' }, l: { min: '200px', img: '140px' } };
 
 function $(id) { return document.getElementById(id); }
+
+// Item titles are hyperlinks to the product when we know its URL (falls back
+// to plain text otherwise, e.g. for items scanned before a url field existed
+// in an older cached snapshot).
+function makeTitleEl(item, key) {
+  const text = item ? item.title : key;
+  const useLink = titleLinksEnabled && item && item.url;
+  const el = document.createElement(useLink ? 'a' : 'span');
+  el.className = 'title';
+  el.textContent = text;
+  el.title = text;
+  if (useLink) {
+    el.href = item.url;
+    el.target = '_blank';
+    el.rel = 'noopener noreferrer';
+    // <a> elements are natively draggable, and since the parent row also
+    // has draggable=true for our own drag-to-reorder, a mousedown on the
+    // link would otherwise kick off the browser's native link-drag instead
+    // of a click. Disabling that lets clicks through normally.
+    el.draggable = false;
+    // Don't let clicking the link kick off a drag on the parent row.
+    el.addEventListener('mousedown', (e) => e.stopPropagation());
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // A normal target="_blank" navigation opens a focused foreground tab,
+      // which steals window focus and causes Chrome to auto-close this
+      // popup. Opening the tab in the background (active: false) via the
+      // extension API keeps focus on the popup so it stays open.
+      e.preventDefault();
+      chrome.tabs.create({ url: item.url, active: false });
+    });
+  }
+  return el;
+}
 
 function sendToTab(tabId, message) {
   return new Promise((resolve, reject) => {
@@ -74,15 +121,196 @@ function renderList() {
     }
     img.addEventListener('error', () => { img.style.visibility = 'hidden'; });
 
-    const title = document.createElement('span');
-    title.className = 'title';
-    title.textContent = item ? item.title : key;
-    title.title = item ? item.title : key;
+    const title = makeTitleEl(item, key);
 
     li.append(badge, handle, img, title);
     listEl.appendChild(li);
   });
   attachDragHandlers();
+  renderTileGrid();
+}
+
+// Tile-based view shown alongside the plain list (toggled via body.grid-mode
+// in CSS) so users reordering long lists can see many items at once instead
+// of scrolling through a narrow single-column list. Shares `order` /
+// `itemsByKey` and the same move/persist logic as the list view — only the
+// markup and drag handlers are separate, so both views always stay in sync.
+function renderTileGrid() {
+  const gridEl = $('tileGrid');
+  gridEl.innerHTML = '';
+  order.forEach((key, idx) => {
+    const item = itemsByKey.get(key);
+    const li = document.createElement('li');
+    li.className = 'tile';
+    li.draggable = true;
+    li.dataset.key = key;
+
+    const badge = document.createElement('input');
+    badge.type = 'number';
+    badge.className = 'badge';
+    badge.min = '1';
+    badge.max = String(order.length);
+    badge.value = String(idx + 1);
+    badge.title = 'Type a number to jump this item to that position';
+    badge.addEventListener('mousedown', (e) => e.stopPropagation());
+    badge.addEventListener('focus', () => { li.draggable = false; });
+    badge.addEventListener('blur', () => { li.draggable = true; });
+    badge.addEventListener('change', () => {
+      const newPos = Math.min(Math.max(1, Math.round(Number(badge.value)) || (idx + 1)), order.length);
+      moveKeyToPosition(key, newPos);
+    });
+    badge.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') badge.blur();
+    });
+
+    const imgWrap = document.createElement('div');
+    imgWrap.className = 'imgwrap';
+    const img = document.createElement('img');
+    img.alt = '';
+    if (item && item.image) {
+      img.src = item.image;
+    } else {
+      img.style.visibility = 'hidden';
+    }
+    img.addEventListener('error', () => { img.style.visibility = 'hidden'; });
+    imgWrap.appendChild(img);
+
+    const title = makeTitleEl(item, key);
+
+    const handle = document.createElement('span');
+    handle.className = 'handle';
+    handle.textContent = '⠿';
+
+    li.append(badge, handle, imgWrap, title);
+    gridEl.appendChild(li);
+  });
+  attachTileDragHandlers();
+}
+
+function attachTileDragHandlers() {
+  let dragSourceKey = null;
+  const gridEl = $('tileGrid');
+  gridEl.querySelectorAll('li.tile').forEach((tile) => {
+    tile.addEventListener('dragstart', () => {
+      dragSourceKey = tile.dataset.key;
+      tile.classList.add('drag-source');
+    });
+    tile.addEventListener('dragend', () => {
+      tile.classList.remove('drag-source');
+      gridEl.querySelectorAll('li.tile').forEach((el) => el.classList.remove('drag-over'));
+    });
+    tile.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      tile.classList.add('drag-over');
+    });
+    tile.addEventListener('dragleave', () => tile.classList.remove('drag-over'));
+    tile.addEventListener('drop', (e) => {
+      e.preventDefault();
+      tile.classList.remove('drag-over');
+      const targetKey = tile.dataset.key;
+      if (!dragSourceKey || dragSourceKey === targetKey) return;
+      const fromIdx = order.indexOf(dragSourceKey);
+      const toIdx = order.indexOf(targetKey);
+      if (fromIdx === -1 || toIdx === -1) return;
+      order.splice(fromIdx, 1);
+      order.splice(toIdx, 0, dragSourceKey);
+      renderList();
+      updateApplyButton();
+      persistOrder();
+    });
+  });
+}
+
+function applyTileSize(size, persist = true) {
+  tileSize = size;
+  const cfg = TILE_SIZES[size] || TILE_SIZES.m;
+  document.documentElement.style.setProperty('--tile-min', cfg.min);
+  document.documentElement.style.setProperty('--tile-img', cfg.img);
+  document.querySelectorAll('.tileSizeBtn').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.size === size);
+  });
+  if (persist) saveSettings();
+}
+
+function setTableView(on, persist = true) {
+  tableView = on;
+  $('tileGrid').classList.toggle('table-view', on);
+  const btn = $('tableViewBtn');
+  btn.classList.toggle('active', on);
+  btn.textContent = on ? '▦' : '☰';
+  btn.title = on ? 'Switch to grid view' : 'Switch to table view';
+  // Zoom doesn't apply to the single-column table layout.
+  $('gridModalHeader').classList.toggle('table-view', on);
+  if (persist) saveSettings();
+}
+
+function setGridMode(on) {
+  gridMode = on;
+  document.body.classList.toggle('grid-mode', on);
+}
+
+function renderCartList() {
+  const section = $('cartSection');
+  const listEl = $('cartList');
+  listEl.innerHTML = '';
+
+  if (cartItems.length === 0) {
+    section.classList.add('hidden');
+    return;
+  }
+  section.classList.remove('hidden');
+
+  cartItems.forEach((item) => {
+    const li = document.createElement('li');
+
+    const img = document.createElement('img');
+    img.alt = '';
+    if (item.image) {
+      img.src = item.image;
+    } else {
+      img.style.visibility = 'hidden';
+    }
+    img.addEventListener('error', () => { img.style.visibility = 'hidden'; });
+
+    const title = makeTitleEl(item, item.key);
+
+    const btn = document.createElement('button');
+    btn.textContent = savingCartKey === item.key ? 'Saving…' : 'Save for later';
+    btn.disabled = !!savingCartKey || applyInProgress;
+    btn.addEventListener('click', () => saveCartItemForLater(item.key));
+
+    li.append(img, title, btn);
+    listEl.appendChild(li);
+  });
+}
+
+async function saveCartItemForLater(key) {
+  if (!activeTabId || savingCartKey || applyInProgress) return;
+  savingCartKey = key;
+  renderCartList();
+  try {
+    const res = await sendToTab(activeTabId, { type: 'SFL_SAVE_FOR_LATER', key });
+    if (!res || !res.ok) {
+      setStatus(res && res.error ? res.error : 'Could not move that item to Saved for later.', true);
+    }
+  } catch (err) {
+    setStatus(`Could not reach the page: ${err.message}`, true);
+  }
+  savingCartKey = null;
+  await fetchCartItems();
+  await loadItems();
+}
+
+async function fetchCartItems() {
+  if (!activeTabId) return;
+  let res;
+  try {
+    res = await sendToTab(activeTabId, { type: 'SFL_GET_CART_ITEMS' });
+  } catch (err) {
+    return;
+  }
+  cartItems = (res && res.items) || [];
+  renderCartList();
 }
 
 function moveKeyToPosition(key, newPos) {
@@ -91,6 +319,7 @@ function moveKeyToPosition(key, newPos) {
   order.splice(fromIdx, 1);
   order.splice(newPos - 1, 0, key);
   renderList();
+  updateApplyButton();
   persistOrder();
 }
 
@@ -107,6 +336,36 @@ function persistOrder() {
   const isCustom = !arraysEqual(order, naturalOrder);
   sendToTab(activeTabId, { type: 'SFL_SET_PENDING_ORDER', order: isCustom ? order : null }).catch(() => {});
   updateResetButton();
+  scheduleApplyEstimate();
+}
+
+// Debounced pre-apply estimate: after any reorder change, ask the content
+// script how many bumps the current arrangement would take and shows it
+// under "Apply order" — before the user has even clicked it — so they know
+// roughly what they're committing to. Only runs while idle (not mid-apply).
+function scheduleApplyEstimate() {
+  if (estimateDebounceHandle) clearTimeout(estimateDebounceHandle);
+  estimateDebounceHandle = setTimeout(refreshApplyEstimate, 250);
+}
+
+async function refreshApplyEstimate() {
+  if (applyInProgress || !activeTabId) return;
+  if (order.length === 0 || arraysEqual(order, naturalOrder)) {
+    setApplyBtnSub('');
+    return;
+  }
+  const seq = ++estimateRequestSeq;
+  let res;
+  try {
+    res = await sendToTab(activeTabId, { type: 'SFL_ESTIMATE_ORDER', order });
+  } catch (err) {
+    return;
+  }
+  // Bail if a newer request has since been kicked off, or an apply started
+  // while this one was in flight — stale results shouldn't clobber the UI.
+  if (seq !== estimateRequestSeq || applyInProgress) return;
+  const eta = formatEta(res && res.estimatedMs);
+  setApplyBtnSub(eta ? `~${eta} to apply` : '');
 }
 
 function arraysEqual(a, b) {
@@ -114,9 +373,18 @@ function arraysEqual(a, b) {
 }
 
 function updateResetButton() {
-  const btn = $('resetBtn');
-  if (!btn) return;
-  btn.disabled = arraysEqual(order, naturalOrder);
+  const isNatural = arraysEqual(order, naturalOrder);
+  $('resetBtn').disabled = isNatural;
+  $('resetBtnModal').disabled = isNatural;
+}
+
+// Nothing to apply if there are no items, or the current arrangement
+// already matches what's on the page.
+function updateApplyButton() {
+  if (applyInProgress) return;
+  const disabled = order.length === 0 || arraysEqual(order, naturalOrder);
+  $('applyBtn').disabled = disabled;
+  $('applyBtnModal').disabled = disabled;
 }
 
 // Reverts to the order items actually appear in on the Amazon page,
@@ -128,6 +396,8 @@ function resetOrder() {
   }
   renderList();
   updateResetButton();
+  updateApplyButton();
+  setApplyBtnSub('');
 }
 
 async function applyPendingOrder(tabId) {
@@ -175,6 +445,7 @@ function attachDragHandlers() {
       order.splice(fromIdx, 1);
       order.splice(toIdx, 0, dragSourceKey);
       renderList();
+      updateApplyButton();
       persistOrder();
     });
   });
@@ -185,6 +456,13 @@ function setMsg(text, isWarning, isLoading) {
   el.textContent = text;
   el.classList.toggle('warning', !!isWarning);
   el.classList.toggle('loading', !!isLoading);
+
+  // The grid modal covers the whole popup, hiding #msg behind it — mirror
+  // the text into its own footer so status is still visible while open.
+  const modalEl = $('modalMsg');
+  modalEl.textContent = text;
+  modalEl.classList.toggle('warning', !!isWarning);
+  modalEl.classList.toggle('loading', !!isLoading);
 }
 
 function setStatus(text, isError) {
@@ -193,12 +471,25 @@ function setStatus(text, isError) {
   el.classList.toggle('error', !!isError);
 }
 
+// Quiet space at the bottom of the popup for secondary messaging (tips,
+// announcements) that shouldn't compete with #msg/#status for attention.
+function setFooterMsg(text) {
+  $('popupFooter').textContent = text || '';
+}
+
+function setApplyBtnSub(text) {
+  $('applyBtnSub').textContent = text || '';
+  $('applyBtnModalSub').textContent = text || '';
+}
+
 function setIncompleteBanner(show) {
   $('incompleteBanner').style.display = show ? 'flex' : 'none';
+  $('modalIncompleteBanner').style.display = show ? 'flex' : 'none';
 }
 
 function setLoadAllDisabled(disabled) {
   $('loadAllBtnInline').disabled = disabled;
+  $('loadAllBtnModal').disabled = disabled;
 }
 
 // Merge a fresh snapshot from the page into our local order/metadata rather
@@ -254,7 +545,7 @@ function startWatching(tabId) {
       setMsg(`${order.length} saved item(s). Drag or type a position number to reorder, then Apply.`);
       setIncompleteBanner(!!(snap && snap.mayBeIncomplete));
     }
-    $('applyBtn').disabled = order.length === 0;
+    updateApplyButton();
   }, 1200);
 }
 
@@ -289,7 +580,16 @@ function pollLoadAllStatus(tabId) {
 // whatever Amazon has already rendered, no page scrolling.
 // skipScroll=false (used by the "Load all items" button): scrolls the page
 // to force Amazon to lazy-load every saved item first.
-async function fetchItems(skipScroll) {
+// Amazon's cart page can still be loading (or still rendering the "Saved
+// for later" section via JS after DOMContentLoaded) at the moment the
+// popup happens to open, which used to just show an empty "no items
+// found" message. Retry a few times with a short delay whenever the page
+// still looks like a cart page but hasn't produced a saved-items section
+// yet, instead of giving up on the first check.
+const PING_RETRY_MAX = 6;
+const PING_RETRY_DELAY_MS = 800;
+
+async function fetchItems(skipScroll, checkForInProgressApply = false, retryCount = 0) {
   setIncompleteBanner(false);
   setMsg(skipScroll ? 'Loading items from the page…' : 'Scrolling through the page to load all saved items…', false, !skipScroll);
   $('applyBtn').disabled = true;
@@ -313,6 +613,11 @@ async function fetchItems(skipScroll) {
   }
 
   if (!ping || !ping.hasSavedItems) {
+    if (ping && ping.isCartPage && retryCount < PING_RETRY_MAX) {
+      setMsg('Cart page is still loading… retrying', false, true);
+      setTimeout(() => fetchItems(skipScroll, checkForInProgressApply, retryCount + 1), PING_RETRY_DELAY_MS);
+      return;
+    }
     setMsg('No "Saved for later" section found on this page. Scroll to it or reload, then hit Refresh.');
     setLoadAllDisabled(false);
     return;
@@ -345,6 +650,7 @@ async function fetchItems(skipScroll) {
   const items = (res && res.items) || [];
   mergeItems(items);
   await applyPendingOrder(tab.id);
+  fetchCartItems();
 
   setLoadAllDisabled(false);
 
@@ -355,36 +661,107 @@ async function fetchItems(skipScroll) {
 
   setMsg(`${order.length} saved item(s). Drag or type a position number to reorder, then Apply.`);
   setIncompleteBanner(!!(res && res.mayBeIncomplete));
-  $('applyBtn').disabled = false;
   renderList();
   updateResetButton();
+  updateApplyButton();
+  scheduleApplyEstimate();
 
   // In case a reorder from a previous popup session is still running.
-  pollStatus();
+  // Only relevant right after the popup opens — not after we've already
+  // just processed a completed apply ourselves, since content.js's status
+  // stays at done:true until the next apply starts and would otherwise
+  // make us re-detect the same "completed" apply forever.
+  if (checkForInProgressApply) pollStatus();
 }
 
-function loadItems() {
-  return fetchItems(true);
+function loadItems(checkForInProgressApply = false) {
+  return fetchItems(true, checkForInProgressApply);
 }
 
 function loadAllItems() {
   return fetchItems(false);
 }
 
+// Disables (or restores) every popup control while a reorder is being
+// applied — the list, settings, load-all — since the page's DOM and item
+// keys are shifting under bumpItem and none of those actions are safe to
+// trigger mid-apply. Apply's own button is handled separately since it also
+// carries the live countdown text. refreshBtn is left alone here — it turns
+// into a Cancel button instead (see setRefreshBtnMode) and stays enabled.
+function setControlsDisabled(disabled) {
+  $('settingsBtn').disabled = disabled;
+  $('settingsBtnModal').disabled = disabled;
+  $('gridViewBtn').disabled = disabled;
+  $('loadAllBtnInline').disabled = disabled;
+  $('loadAllBtnModal').disabled = disabled;
+  $('list').classList.toggle('disabled', disabled);
+  $('tileGrid').classList.toggle('disabled', disabled);
+  $('tableViewBtn').disabled = disabled;
+  document.querySelectorAll('.tileSizeBtn').forEach((btn) => { btn.disabled = disabled; });
+  if (disabled) {
+    $('resetBtn').disabled = true;
+    $('resetBtnModal').disabled = true;
+  } else {
+    updateResetButton();
+  }
+}
+
+// Swaps refreshBtn between its normal "Refresh" behavior and a "Cancel"
+// button that halts an in-progress reorder.
+function setRefreshBtnMode(cancelling) {
+  const btn = $('refreshBtn');
+  btn.textContent = cancelling ? 'Cancel' : 'Refresh';
+  btn.title = cancelling ? 'Stop the in-progress reorder' : 'Quickly rescan without scrolling';
+  btn.classList.toggle('cancel', cancelling);
+  btn.disabled = false;
+}
+
+let cancelRequested = false;
+
+async function cancelApply() {
+  if (!activeTabId || cancelRequested) return;
+  cancelRequested = true;
+  setRefreshBtnMode(true);
+  $('refreshBtn').disabled = true;
+  setStatus('Cancelling…');
+  try {
+    await sendToTab(activeTabId, { type: 'SFL_CANCEL_APPLY' });
+  } catch (err) {
+    // Ignore — the status poll will surface any real connection loss.
+  }
+}
+
 async function applyOrder() {
   if (!activeTabId) return;
   applyInProgress = true;
+  cancelRequested = false;
   $('applyBtn').disabled = true;
+  $('applyBtnModal').disabled = true;
+  setControlsDisabled(true);
+  setRefreshBtnMode(true);
   setStatus('Starting…');
   try {
     await sendToTab(activeTabId, { type: 'SFL_APPLY_ORDER', order });
   } catch (err) {
     setStatus(`Could not reach the page: ${err.message}`, true);
-    $('applyBtn').disabled = false;
+    setApplyBtnSub('');
     applyInProgress = false;
+    updateApplyButton();
+    setControlsDisabled(false);
+    setRefreshBtnMode(false);
     return;
   }
   pollStatus();
+}
+
+// Formats a rough ETA (content.js's estimatedRemainingMs — an
+// approximation, not a measured value) into a short "1m 20s" / "45s" string.
+function formatEta(ms) {
+  if (!ms || ms <= 0) return null;
+  const totalSeconds = Math.ceil(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
 function pollStatus() {
@@ -396,7 +773,28 @@ function pollStatus() {
       res = await sendToTab(activeTabId, { type: 'SFL_GET_STATUS' });
     } catch (err) {
       clearInterval(statusPollHandle);
-      applyInProgress = false;
+      // Losing the connection while an apply was in progress almost always
+      // means the page reloaded right after finishing (content.js only
+      // reloads after a successful completion) — the poll can land on this
+      // catch block instead of ever seeing the final s.done tick, since the
+      // reload can sever the connection before the next 800ms poll fires.
+      // Without this, the UI is left stuck showing the last "Reordering
+      // N/N…" text with no further update. Treat it as done.
+      if (applyInProgress) {
+        applyInProgress = false;
+        stopWatching();
+        setStatus('Done! Page refreshed.');
+        setApplyBtnSub('');
+        order = [];
+        naturalOrder = [];
+        updateApplyButton();
+        setControlsDisabled(false);
+        setRefreshBtnMode(false);
+        cancelRequested = false;
+        // Give the reloaded page a moment to finish loading and re-inject
+        // its content script before trying to reconnect.
+        setTimeout(loadItems, 1500);
+      }
       return;
     }
     const s = res && res.status;
@@ -404,17 +802,40 @@ function pollStatus() {
     if (s.running) {
       applyInProgress = true;
       setStatus(s.message || `Reordering ${s.current}/${s.total}…`);
+      const eta = formatEta(s.estimatedRemainingMs);
+      setApplyBtnSub(eta ? `~${eta} remaining` : (s.total ? `${s.current}/${s.total}` : ''));
       $('applyBtn').disabled = true;
+      $('applyBtnModal').disabled = true;
+      setControlsDisabled(true);
+      setRefreshBtnMode(true);
+      $('refreshBtn').disabled = cancelRequested;
     } else if (s.error) {
       applyInProgress = false;
       setStatus(s.message, true);
-      $('applyBtn').disabled = false;
+      setApplyBtnSub('');
+      updateApplyButton();
+      setControlsDisabled(false);
+      setRefreshBtnMode(false);
+      cancelRequested = false;
       clearInterval(statusPollHandle);
     } else if (s.done) {
       applyInProgress = false;
+      stopWatching();
       setStatus(s.message);
-      $('applyBtn').disabled = false;
+      setApplyBtnSub('');
+      setControlsDisabled(false);
+      setRefreshBtnMode(false);
+      cancelRequested = false;
       clearInterval(statusPollHandle);
+      // mergeItems only filters/appends onto the existing order/naturalOrder
+      // arrays (so incremental lazy-load scans don't churn existing
+      // ordering) — but that's wrong right after an apply, since the page's
+      // real order just changed and naturalOrder would otherwise be left
+      // pointing at the stale pre-apply arrangement. Clear both so the next
+      // scan rebuilds them fresh from the page's actual new order, keeping
+      // order/naturalOrder in sync (avoids a stale nonzero apply estimate).
+      order = [];
+      naturalOrder = [];
       // The content script already cleared its pending order as soon as
       // SFL_APPLY_ORDER was sent — the applied order is now the page's
       // real order.
@@ -423,44 +844,77 @@ function pollStatus() {
   }, 800);
 }
 
-function loadSettings() {
+function loadSettings(onLoaded) {
   chrome.storage.local.get(STORAGE_KEY, (res) => {
     const s = { ...DEFAULTS, ...(res[STORAGE_KEY] || {}) };
     $('delay').value = s.bumpDelayMs;
     $('reloadAfterApply').checked = s.reloadAfterApply;
+    $('defaultView').value = s.defaultView === 'grid' ? 'grid' : 'popup';
+    $('titleLinksEnabled').checked = s.titleLinksEnabled;
+    titleLinksEnabled = s.titleLinksEnabled;
+    applyTileSize(TILE_SIZES[s.tileSize] ? s.tileSize : DEFAULTS.tileSize, false);
+    setTableView(!!s.tableView, false);
+    if (onLoaded) onLoaded(s);
   });
 }
 
 function saveSettings() {
+  titleLinksEnabled = $('titleLinksEnabled').checked;
   const s = {
     bumpDelayMs: Number($('delay').value) || DEFAULTS.bumpDelayMs,
-    reloadAfterApply: $('reloadAfterApply').checked
+    reloadAfterApply: $('reloadAfterApply').checked,
+    tileSize,
+    defaultView: $('defaultView').value === 'grid' ? 'grid' : 'popup',
+    titleLinksEnabled,
+    tableView
   };
   chrome.storage.local.set({ [STORAGE_KEY]: s });
+  renderList();
+  renderCartList();
+}
+
+function toggleSettingsPanel(forceOpen) {
+  const panel = $('settingsPanel');
+  const backdrop = $('settingsBackdrop');
+  const opening = forceOpen !== undefined ? forceOpen : !panel.classList.contains('show');
+  panel.classList.toggle('show', opening);
+  backdrop.classList.toggle('show', opening);
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  loadSettings();
-  loadItems();
+  loadSettings((s) => {
+    if (s.defaultView === 'grid') setGridMode(true);
+  });
+  loadItems(true);
+  setFooterMsg('💡 Try Grid view for reordering long lists faster.');
 
-  $('refreshBtn').addEventListener('click', loadItems);
-  $('loadAllBtnInline').addEventListener('click', loadAllItems);
-  $('applyBtn').addEventListener('click', applyOrder);
-  $('resetBtn').addEventListener('click', resetOrder);
-  $('settingsBtn').addEventListener('click', () => {
-    const panel = $('settingsPanel');
-    const opening = panel.style.display !== 'block';
-    panel.style.display = opening ? 'block' : 'none';
-    if (opening) {
-      // Let the new height take effect before scrolling, so the settings
-      // aren't cut off at the bottom of the popup.
-      requestAnimationFrame(() => {
-        panel.scrollIntoView({ block: 'end' });
-      });
+  $('refreshBtn').addEventListener('click', () => {
+    if (applyInProgress) {
+      cancelApply();
+    } else {
+      loadItems();
     }
   });
+  $('loadAllBtnInline').addEventListener('click', loadAllItems);
+  $('loadAllBtnModal').addEventListener('click', loadAllItems);
+  $('gridViewBtn').addEventListener('click', () => setGridMode(true));
+  $('closeGridBtn').addEventListener('click', () => setGridMode(false));
+  $('tableViewBtn').addEventListener('click', () => setTableView(!tableView));
+  document.querySelectorAll('.tileSizeBtn').forEach((btn) => {
+    btn.addEventListener('click', () => applyTileSize(btn.dataset.size));
+  });
+  $('applyBtn').addEventListener('click', applyOrder);
+  $('resetBtn').addEventListener('click', resetOrder);
+  $('applyBtnModal').addEventListener('click', applyOrder);
+  $('resetBtnModal').addEventListener('click', resetOrder);
+  $('settingsBtn').addEventListener('click', () => toggleSettingsPanel());
+  $('settingsBtnModal').addEventListener('click', () => toggleSettingsPanel());
+  $('settingsBackdrop').addEventListener('click', () => toggleSettingsPanel(false));
+  $('closeSettingsBtn').addEventListener('click', () => toggleSettingsPanel(false));
   $('delay').addEventListener('change', saveSettings);
   $('reloadAfterApply').addEventListener('change', saveSettings);
+  $('defaultView').addEventListener('change', saveSettings);
+  $('titleLinksEnabled').addEventListener('change', saveSettings);
 });
 
 window.addEventListener('unload', () => {
