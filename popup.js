@@ -24,6 +24,7 @@ let gridMode = false;
 let tableView = false;
 let tileSize = 'm';
 let titleLinksEnabled = true;
+let defaultView = 'popup'; // 'grid' means Extended is the default — closeGridBtn closes the popup instead of returning to compact
 const TILE_SIZES = { s: { min: '110px', img: '70px' }, m: { min: '150px', img: '100px' }, l: { min: '200px', img: '140px' } };
 
 function $(id) { return document.getElementById(id); }
@@ -188,37 +189,13 @@ function renderTileGrid() {
 }
 
 function attachTileDragHandlers() {
-  let dragSourceKey = null;
   const gridEl = $('tileGrid');
-  gridEl.querySelectorAll('li.tile').forEach((tile) => {
-    tile.addEventListener('dragstart', () => {
-      dragSourceKey = tile.dataset.key;
-      tile.classList.add('drag-source');
-    });
-    tile.addEventListener('dragend', () => {
-      tile.classList.remove('drag-source');
-      gridEl.querySelectorAll('li.tile').forEach((el) => el.classList.remove('drag-over'));
-    });
-    tile.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      tile.classList.add('drag-over');
-    });
-    tile.addEventListener('dragleave', () => tile.classList.remove('drag-over'));
-    tile.addEventListener('drop', (e) => {
-      e.preventDefault();
-      tile.classList.remove('drag-over');
-      const targetKey = tile.dataset.key;
-      if (!dragSourceKey || dragSourceKey === targetKey) return;
-      const fromIdx = order.indexOf(dragSourceKey);
-      const toIdx = order.indexOf(targetKey);
-      if (fromIdx === -1 || toIdx === -1) return;
-      order.splice(fromIdx, 1);
-      order.splice(toIdx, 0, dragSourceKey);
-      renderList();
-      updateApplyButton();
-      persistOrder();
-    });
-  });
+  // Table view lays tiles out as a single top-to-bottom column, so the
+  // drop-line split should follow the vertical midpoint there, same as the
+  // plain list; the real tile grid flows left-to-right, so it uses the
+  // horizontal midpoint instead.
+  const axis = gridEl.classList.contains('table-view') ? 'y' : 'x';
+  attachReorderDragHandlers(gridEl, 'li.tile', axis);
 }
 
 function applyTileSize(size, persist = true) {
@@ -417,38 +394,113 @@ async function applyPendingOrder(tabId) {
   }
 }
 
-function attachDragHandlers() {
+// Native HTML5 drag-and-drop suppresses normal wheel/trackpad scrolling on
+// the container while a drag is in progress, so a drag started near the top
+// or bottom of a scrollable list would otherwise strand the user unable to
+// reach items further down. This nudges the container's scrollTop while the
+// dragged pointer hovers near an edge, standing in for the scroll the OS
+// would normally allow.
+function autoScrollContainerOnDragover(container, clientY) {
+  const rect = container.getBoundingClientRect();
+  const edge = 32;
+  const maxSpeed = 14;
+  const distFromTop = clientY - rect.top;
+  const distFromBottom = rect.bottom - clientY;
+  if (distFromTop < edge) {
+    container.scrollTop -= maxSpeed * (1 - Math.max(distFromTop, 0) / edge);
+  } else if (distFromBottom < edge) {
+    container.scrollTop += maxSpeed * (1 - Math.max(distFromBottom, 0) / edge);
+  }
+}
+
+// Shared drag-to-reorder wiring for both the plain list and the tile grid.
+// `axis` picks whether the before/after split (and therefore the drop-line
+// indicator) is judged along the vertical or horizontal midpoint of the
+// hovered item — vertical for stacked rows, horizontal for a left-to-right
+// grid flow.
+function attachReorderDragHandlers(container, itemSelector, axis) {
   let dragSourceKey = null;
-  const listEl = $('list');
-  listEl.querySelectorAll('li').forEach((li) => {
-    li.addEventListener('dragstart', () => {
-      dragSourceKey = li.dataset.key;
-      li.classList.add('drag-source');
+  let dropTargetKey = null;
+  let dropPosition = 'before';
+  let cancelled = false;
+  // Chrome only fires 'dragover' a few times a second, so driving autoscroll
+  // off that event alone feels laggy. Instead we stash the latest pointer
+  // position from whatever dragover events do arrive and re-apply the scroll
+  // nudge every animation frame, decoupling scroll smoothness from the
+  // native event cadence.
+  let lastClientY = null;
+  let rafHandle = null;
+
+  function clearIndicators() {
+    container.querySelectorAll(itemSelector).forEach((el) => {
+      el.classList.remove('drag-over-before', 'drag-over-after');
     });
-    li.addEventListener('dragend', () => {
-      li.classList.remove('drag-source');
-      listEl.querySelectorAll('li').forEach((el) => el.classList.remove('drag-over'));
+  }
+
+  function autoScrollTick() {
+    if (lastClientY !== null) autoScrollContainerOnDragover(container, lastClientY);
+    rafHandle = requestAnimationFrame(autoScrollTick);
+  }
+
+  function onKeyDown(e) {
+    if (e.key !== 'Escape') return;
+    cancelled = true;
+    clearIndicators();
+  }
+
+  container.querySelectorAll(itemSelector).forEach((item) => {
+    item.addEventListener('dragstart', () => {
+      dragSourceKey = item.dataset.key;
+      dropTargetKey = null;
+      cancelled = false;
+      item.classList.add('drag-source');
+      document.addEventListener('keydown', onKeyDown);
+      rafHandle = requestAnimationFrame(autoScrollTick);
     });
-    li.addEventListener('dragover', (e) => {
+    item.addEventListener('dragend', () => {
+      item.classList.remove('drag-source');
+      clearIndicators();
+      dragSourceKey = null;
+      lastClientY = null;
+      document.removeEventListener('keydown', onKeyDown);
+      if (rafHandle !== null) cancelAnimationFrame(rafHandle);
+      rafHandle = null;
+    });
+    item.addEventListener('dragover', (e) => {
       e.preventDefault();
-      li.classList.add('drag-over');
+      lastClientY = e.clientY;
+      if (cancelled) return;
+      const rect = item.getBoundingClientRect();
+      const before = axis === 'x'
+        ? (e.clientX - rect.left) < rect.width / 2
+        : (e.clientY - rect.top) < rect.height / 2;
+      dropTargetKey = item.dataset.key;
+      dropPosition = before ? 'before' : 'after';
+      clearIndicators();
+      item.classList.add(before ? 'drag-over-before' : 'drag-over-after');
     });
-    li.addEventListener('dragleave', () => li.classList.remove('drag-over'));
-    li.addEventListener('drop', (e) => {
+    item.addEventListener('dragleave', () => {
+      if (dropTargetKey === item.dataset.key) item.classList.remove('drag-over-before', 'drag-over-after');
+    });
+    item.addEventListener('drop', (e) => {
       e.preventDefault();
-      li.classList.remove('drag-over');
-      const targetKey = li.dataset.key;
-      if (!dragSourceKey || dragSourceKey === targetKey) return;
+      clearIndicators();
+      if (cancelled || !dragSourceKey || dragSourceKey === dropTargetKey) return;
       const fromIdx = order.indexOf(dragSourceKey);
-      const toIdx = order.indexOf(targetKey);
+      let toIdx = order.indexOf(dropTargetKey);
       if (fromIdx === -1 || toIdx === -1) return;
       order.splice(fromIdx, 1);
-      order.splice(toIdx, 0, dragSourceKey);
+      toIdx = order.indexOf(dropTargetKey);
+      order.splice(dropPosition === 'after' ? toIdx + 1 : toIdx, 0, dragSourceKey);
       renderList();
       updateApplyButton();
       persistOrder();
     });
   });
+}
+
+function attachDragHandlers() {
+  attachReorderDragHandlers($('list'), 'li', 'y');
 }
 
 function setMsg(text, isWarning, isLoading) {
@@ -850,6 +902,8 @@ function loadSettings(onLoaded) {
     $('delay').value = s.bumpDelayMs;
     $('reloadAfterApply').checked = s.reloadAfterApply;
     $('defaultView').value = s.defaultView === 'grid' ? 'grid' : 'popup';
+    defaultView = s.defaultView === 'grid' ? 'grid' : 'popup';
+    $('closeGridBtn').title = defaultView === 'grid' ? 'Close popup' : 'Close grid view';
     $('titleLinksEnabled').checked = s.titleLinksEnabled;
     titleLinksEnabled = s.titleLinksEnabled;
     applyTileSize(TILE_SIZES[s.tileSize] ? s.tileSize : DEFAULTS.tileSize, false);
@@ -869,6 +923,9 @@ function saveSettings() {
     tableView
   };
   chrome.storage.local.set({ [STORAGE_KEY]: s });
+  defaultView = s.defaultView;
+  $('closeGridBtn').title = defaultView === 'grid' ? 'Close popup' : 'Close grid view';
+  setGridMode(s.defaultView === 'grid');
   renderList();
   renderCartList();
 }
@@ -898,7 +955,12 @@ document.addEventListener('DOMContentLoaded', () => {
   $('loadAllBtnInline').addEventListener('click', loadAllItems);
   $('loadAllBtnModal').addEventListener('click', loadAllItems);
   $('gridViewBtn').addEventListener('click', () => setGridMode(true));
-  $('closeGridBtn').addEventListener('click', () => setGridMode(false));
+  $('closeGridBtn').addEventListener('click', () => {
+    // With Extended set as the default view there's no plain popup to fall
+    // back to, so closing the grid there closes the popup entirely instead.
+    if (defaultView === 'grid') { window.close(); return; }
+    setGridMode(false);
+  });
   $('tableViewBtn').addEventListener('click', () => setTableView(!tableView));
   document.querySelectorAll('.tileSizeBtn').forEach((btn) => {
     btn.addEventListener('click', () => applyTileSize(btn.dataset.size));

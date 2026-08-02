@@ -11,8 +11,15 @@
     transition: width 0.15s ease;
   }
   body.grid-mode { width: 800px; max-height: 600px; }
-  #header { display: flex; align-items: center; margin-bottom: 5px; }
+  #header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
   h3 { margin: 0; font-size: 15px; color: #0f1111; }
+  #headerActions { display: flex; gap: 6px; flex-shrink: 0; }
+  #headerActions button {
+    width: 26px; height: 26px; padding: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 14px; line-height: 1; background: #f0f2f2; border: 1px solid #d5d9d9;
+    color: #0f1111; box-shadow: none; border-radius: 999px; flex-shrink: 0;
+  }
+  #headerActions button:hover { background: #e3e6e6; }
   #msg { color: #565959; font-size: 12px; margin: 5px 0; }
   #msg.warning { color: #915400; }
   #msg.loading { font-weight: bold; color: #0f1111; }
@@ -32,7 +39,8 @@
   }
   #list li:last-child { border-bottom: none; }
   #list li.drag-source { opacity: 0.35; }
-  #list li.drag-over { outline: 2px dashed #e77600; outline-offset: -2px; }
+  #list li.drag-over-before { box-shadow: inset 0 2px 0 0 #e77600; }
+  #list li.drag-over-after { box-shadow: inset 0 -2px 0 0 #e77600; }
   #list img { width: 36px; height: 36px; object-fit: contain; flex-shrink: 0; background: #f5f5f5; border-radius: 4px; }
   a.title { color: inherit; text-decoration: none; cursor: pointer; }
   a.title:hover { text-decoration: underline; color: #007185; }
@@ -70,6 +78,7 @@
   .tileSizeBtn:hover { background: #e3e6e6; }
   .tileSizeBtn.active { background: #0f1111; color: #fff; }
   #tableViewBtn {
+    margin-left: auto;
     width: 26px; height: 26px; padding: 0; display: flex; align-items: center; justify-content: center;
     font-size: 14px; line-height: 1; background: #f0f2f2; border: 1px solid #d5d9d9;
     color: #0f1111; box-shadow: none; border-radius: 999px;
@@ -83,7 +92,7 @@
   }
   #settingsBtnModal:hover { background: #e3e6e6; }
   #closeGridBtn {
-    margin-left: auto; width: 26px; height: 26px; padding: 0; flex-shrink: 0;
+    width: 26px; height: 26px; padding: 0; flex-shrink: 0;
     background: #f0f2f2; border: 1px solid #d5d9d9; color: #0f1111; box-shadow: none;
     border-radius: 999px; font-size: 13px; line-height: 1;
   }
@@ -102,7 +111,10 @@
   }
   #tileGrid li.tile .handle { display: none; }
   #tileGrid li.tile.drag-source { opacity: 0.35; }
-  #tileGrid li.tile.drag-over { outline: 2px dashed #e77600; outline-offset: -2px; }
+  #tileGrid li.tile.drag-over-before { box-shadow: inset 2px 0 0 0 #e77600; }
+  #tileGrid li.tile.drag-over-after { box-shadow: inset -2px 0 0 0 #e77600; }
+  #tileGrid.table-view li.tile.drag-over-before { box-shadow: inset 0 2px 0 0 #e77600; }
+  #tileGrid.table-view li.tile.drag-over-after { box-shadow: inset 0 -2px 0 0 #e77600; }
   #tileGrid .badge {
     width: 32px; text-align: center; font-size: 11px; font-weight: bold; background: #e77600; color: #fff;
     border-radius: 999px; padding: 2px 4px; flex-shrink: 0; border: 1px solid #cc6900;
@@ -198,14 +210,12 @@
   #applyBtn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
   #applyBtnSub { font-size: 10px; font-weight: 400; color: #6b5900; }
   #applyBtnSub:empty { display: none; }
-  #refreshBtn, #loadAllBtn, #resetBtn, #settingsBtn, #gridViewBtn { background: #f0f2f2; border: 1px solid #d5d9d9; color: #0f1111; }
-  #refreshBtn:hover, #loadAllBtn:hover:not(:disabled), #resetBtn:hover:not(:disabled), #settingsBtn:hover, #gridViewBtn:hover { background: #e3e6e6; }
-  #gridViewBtn { padding: 7px 10px; }
+  #refreshBtn, #loadAllBtn, #resetBtn { background: #f0f2f2; border: 1px solid #d5d9d9; color: #0f1111; }
+  #refreshBtn:hover, #loadAllBtn:hover:not(:disabled), #resetBtn:hover:not(:disabled) { background: #e3e6e6; }
   #loadAllBtn:disabled, #resetBtn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
   #refreshBtn.cancel { background: #c40000; border-color: #a80000; color: #fff; }
   #refreshBtn.cancel:hover:not(:disabled) { background: #a80000; }
   #refreshBtn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
-  #settingsBtn { padding: 7px 10px; flex-shrink: 0; box-shadow: none; }
   #status { margin-top: 5px; font-size: 12px; white-space: pre-wrap; color: #333; }
   #status:empty { margin-top: 0; }
   #status.error { color: #c40000; }
@@ -260,6 +270,10 @@
 <body>
   <div id="header">
     <h3>Reorder saved for later</h3>
+    <div id="headerActions">
+      <button id="gridViewBtn" title="Expand into a tile view for reordering with less scrolling">⛶</button>
+      <button id="settingsBtn" title="Settings">⚙</button>
+    </div>
   </div>
   <div id="msg"></div>
 
@@ -298,8 +312,6 @@
   </div>
 
   <div id="actions">
-    <button id="settingsBtn" title="Settings">⚙</button>
-    <button id="gridViewBtn" title="Expand into a tile view for reordering with less scrolling">Grid view</button>
     <button id="refreshBtn" title="Quickly rescan without scrolling">Refresh</button>
     <button id="resetBtn" title="Restore the order items actually appear in on the page" disabled>Reset</button>
     <button id="applyBtn" disabled>
